@@ -112,3 +112,5 @@
     text-align: right;
   }
 }
+
+.server-error{position:sticky;top:0;z-index:1000;padding:12px 20px;background:#8c2438;color:#fff;text-align:center;font:600 14px Arial,sans-serif}

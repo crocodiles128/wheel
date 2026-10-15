@@ -1,18 +1,35 @@
 (function () {
-  const KEY = 'giro-plus-race-prototype-v1';
   const MAX_NUMBER = 2500;
   const RANGE_SIZE = 250;
   const RANGE_COUNT = MAX_NUMBER / RANGE_SIZE;
   const PALETTE = ['#6b43b5', '#b69ae9', '#c7f36b', '#8b67cb', '#d8c7ff', '#443063', '#a788df', '#daf49e'];
   const SEED = {
-    title: 'Sorteio da corrida.',
+    title: 'Sorteio',
     subtitle: 'Gire a roleta para sortear um dos n\u00fameros participantes.',
-    prizeName: 'Pr\u00eamio padr\u00e3o da corrida',
-    prizeDescription: 'Procure a organiza\u00e7\u00e3o da corrida para receber seu pr\u00eamio.',
+    prizeName: 'Pr\u00eamio padr\u00e3o',
+    prizeDescription: 'Procure a organiza\u00e7\u00e3o para receber seu pr\u00eamio.',
     available: Array.from({ length: MAX_NUMBER }, (_, index) => index + 1),
     drawn: []
   };
   const clone = value => JSON.parse(JSON.stringify(value));
+  let serverState = null;
+  function api(action, payload) {
+    const request = new XMLHttpRequest();
+    request.open(action === 'load' ? 'GET' : 'POST', 'api.php' + (action === 'load' ? '' : '?action=' + encodeURIComponent(action)), false);
+    request.setRequestHeader('Accept', 'application/json');
+    if (action !== 'load') request.setRequestHeader('Content-Type', 'application/json');
+    try {
+      request.send(action === 'load' ? null : JSON.stringify(Object.assign({ action }, payload || {})));
+      const response = JSON.parse(request.responseText || '{}');
+      if (request.status < 200 || request.status >= 300) throw new Error(response.error || 'Falha ao comunicar com o servidor.');
+      return response;
+    } catch (error) {
+      throw new Error(error.message || 'Não foi possível conectar ao servidor.');
+    }
+  }
+  function reportServerError(error) {
+    alert('Não foi possível acessar o sorteio no servidor. Verifique a conexão e tente novamente.\n\n' + error.message);
+  }
   const escapeHtml = value => String(value || '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 
   function relativeLuminance(color) {
@@ -30,21 +47,25 @@
   function freshState() { return clone(SEED); }
 
   function read() {
-    try {
-      const value = JSON.parse(localStorage.getItem(KEY));
-      if (value && Array.isArray(value.available) && Array.isArray(value.drawn)) {
-        value.available = value.available.filter(number => Number.isInteger(number) && number >= 1 && number <= MAX_NUMBER);
-        return value;
-      }
-      return freshState();
-    } catch (error) {
-      return freshState();
-    }
+    return serverState ? clone(serverState) : freshState();
   }
 
   function save(value) {
-    localStorage.setItem(KEY, JSON.stringify(value));
+    const response = api('save', value);
+    serverState = response.state;
     window.dispatchEvent(new CustomEvent('raffle-update'));
+  }
+
+  function refreshFromServer() {
+    try {
+      const latest = api('load').state;
+      if (JSON.stringify(latest) !== JSON.stringify(serverState)) {
+        serverState = latest;
+        window.dispatchEvent(new CustomEvent('raffle-update'));
+      }
+    } catch (error) {
+      // Keep the last server snapshot visible; actions still report the connection failure.
+    }
   }
 
   function getRanges(available) {
@@ -56,6 +77,12 @@
   }
 
   const wheel = document.getElementById('wheelSvg');
+
+  try {
+    serverState = api('load').state;
+  } catch (error) {
+    document.body.insertAdjacentHTML('afterbegin', '<div class="server-error" role="alert">N&atilde;o foi poss&iacute;vel carregar o sorteio do servidor. Confirme que o site est&aacute; hospedado com PHP ativo.</div>');
+  }
 
   function drawWheel() {
     if (!wheel) return;
@@ -205,16 +232,20 @@
 
   if (wheel) {
     drawWheel();
-    window.addEventListener('storage', event => { if (event.key === KEY) drawWheel(); });
     window.addEventListener('raffle-update', drawWheel);
+    window.setInterval(refreshFromServer, 5000);
     let spinning = false;
     document.getElementById('spinButton').addEventListener('click', () => {
       if (spinning) return;
-      const data = read();
+      let data = read();
       const total = data.available.length;
       if (!total) return;
+      let response;
+      try { response = api('draw'); serverState = response.state; }
+      catch (error) { reportServerError(error); return; }
+      const winner = response.winner;
+      if (!Number.isInteger(winner) || !data.available.includes(winner)) { refreshFromServer(); return; }
       spinning = true;
-      const winner = data.available[Math.floor(Math.random() * total)];
       ['wheelNumberResult', 'crateNumberResult', 'globeNumberResult'].forEach(id => { document.getElementById(id).textContent = '----'; });
       const globe = document.getElementById('lotteryGlobe');
       globe.classList.remove('has-winner');
@@ -223,12 +254,6 @@
       prepareCrateReel(winner, data.available);
       setTimeout(() => {
         const latest = read();
-        const numberIndex = latest.available.indexOf(winner);
-        if (numberIndex !== -1) {
-          latest.available.splice(numberIndex, 1);
-          latest.drawn.push({ number: winner, drawnAt: new Date().toISOString() });
-          save(latest);
-        }
         globe.classList.remove('is-spinning');
         globe.classList.add('has-winner');
         showNumberInAllOptions(winner);
@@ -247,8 +272,8 @@
 
   if (document.getElementById('settingsForm')) {
     drawAdmin();
-    window.addEventListener('storage', event => { if (event.key === KEY) drawAdmin(); });
     window.addEventListener('raffle-update', drawAdmin);
+    window.setInterval(refreshFromServer, 5000);
     document.getElementById('settingsForm').addEventListener('submit', event => {
       event.preventDefault();
       const data = read();
@@ -256,14 +281,15 @@
       data.subtitle = document.getElementById('subtitleInput').value.trim() || SEED.subtitle;
       data.prizeName = document.getElementById('prizeNameInput').value.trim() || SEED.prizeName;
       data.prizeDescription = document.getElementById('prizeDescriptionInput').value.trim() || SEED.prizeDescription;
-      save(data);
+      try { save(data); } catch (error) { reportServerError(error); }
     });
     document.getElementById('resetDraw').addEventListener('click', () => {
       if (!confirm('Reiniciar o sorteio? Isso devolver\u00e1 os 2500 n\u00fameros \u00e0 roleta e apagar\u00e1 o hist\u00f3rico atual.')) return;
-      const data = read();
-      data.available = Array.from({ length: MAX_NUMBER }, (_, index) => index + 1);
-      data.drawn = [];
-      save(data);
+      try {
+        const response = api('reset');
+        serverState = response.state;
+        window.dispatchEvent(new CustomEvent('raffle-update'));
+      } catch (error) { reportServerError(error); }
     });
   }
 })();
