@@ -1,88 +1,57 @@
 <?php
 declare(strict_types=1);
-
+session_start();
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
-header('Pragma: no-cache');
 
-const MAX_NUMBER = 2500;
-$dataDir = __DIR__ . DIRECTORY_SEPARATOR . 'data';
-$dataFile = $dataDir . DIRECTORY_SEPARATOR . 'raffle-state.json';
+function out(array $data, int $status = 200): never {
+    http_response_code($status); echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); exit;
+}
+function db(): PDO {
+    $configFile = __DIR__ . '/db-config.php';
+    if (!is_file($configFile)) out(['error'=>'Banco não configurado. Copie db-config.example.php para db-config.php e informe os dados MySQL.'], 503);
+    $c = require $configFile;
+    try { return new PDO("mysql:host={$c['host']};dbname={$c['database']};charset=utf8mb4", $c['user'], $c['password'], [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC]); }
+    catch (Throwable $e) { out(['error'=>'Não foi possível conectar ao banco de dados.'], 503); }
+}
+function body(): array { $v=json_decode(file_get_contents('php://input') ?: '', true); return is_array($v) ? $v : $_POST; }
+function admin(): bool { return !empty($_SESSION['raffle_admin']); }
+function requireAdmin(): void { if (!admin()) out(['error'=>'Acesso restrito aos colaboradores.'], 401); }
+function clientIp(): string { return $_SERVER['REMOTE_ADDR'] ?? 'unknown'; }
 
-function seedState(): array {
-    return [
-        'title' => 'Sorteio',
-        'subtitle' => 'Gire a roleta para sortear um dos números participantes.',
-        'prizeName' => 'Prêmio padrão',
-        'prizeDescription' => 'Procure a organização para receber seu prêmio.',
-        'available' => range(1, MAX_NUMBER),
-        'drawn' => [],
-    ];
-}
-
-function sendJson(array $payload, int $status = 200): void {
-    http_response_code($status);
-    echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    exit;
-}
-
-if (!is_dir($dataDir) && !mkdir($dataDir, 0775, true) && !is_dir($dataDir)) {
-    sendJson(['error' => 'Não foi possível criar a pasta de dados.'], 500);
-}
-$handle = @fopen($dataFile, 'c+');
-if (!$handle || !flock($handle, LOCK_EX)) {
-    sendJson(['error' => 'O servidor não conseguiu acessar os dados do sorteio.'], 500);
-}
-$raw = stream_get_contents($handle);
-$state = json_decode($raw ?: '', true);
-if (!is_array($state) || !isset($state['available'], $state['drawn']) || !is_array($state['available']) || !is_array($state['drawn'])) {
-    $state = seedState();
-}
-$state += seedState();
-$state['available'] = array_values(array_unique(array_filter($state['available'], static fn($n) => is_int($n) && $n >= 1 && $n <= MAX_NUMBER)));
-$state['drawn'] = array_values(array_filter($state['drawn'], static fn($entry) => (is_int($entry) && $entry >= 1 && $entry <= MAX_NUMBER) || (is_array($entry) && isset($entry['number']) && is_numeric($entry['number']) && (int)$entry['number'] >= 1 && (int)$entry['number'] <= MAX_NUMBER)));
-
-$action = $_SERVER['REQUEST_METHOD'] === 'POST' ? ($_POST['action'] ?? '') : 'load';
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_POST)) {
-    $body = json_decode(file_get_contents('php://input') ?: '', true);
-    if (is_array($body)) { $action = $body['action'] ?? ''; }
-}
-
-if ($action === 'save') {
-    $body = json_decode(file_get_contents('php://input') ?: '', true);
-    if (!is_array($body)) { sendJson(['error' => 'Dados inválidos.'], 400); }
-    foreach (['title' => 64, 'subtitle' => 110, 'prizeName' => 64, 'prizeDescription' => 130] as $field => $limit) {
-        if (isset($body[$field]) && is_string($body[$field])) {
-            $characters = preg_split('//u', trim($body[$field]), -1, PREG_SPLIT_NO_EMPTY);
-            $state[$field] = $characters === false ? substr(trim($body[$field]), 0, $limit) : implode('', array_slice($characters, 0, $limit));
-        }
+$action = $_GET['action'] ?? $_POST['action'] ?? '';
+$pdo = db();
+if ($action === 'register') {
+    $closed = $pdo->query("SELECT valor FROM configuracoes WHERE chave='inscricoes_fechadas'")->fetchColumn();
+    if ($closed === '1') out(['error'=>'As inscrições para este sorteio foram encerradas.'], 410);
+    if (!admin()) {
+        $bucket=(int)floor(time()/60); $ipHash=hash('sha256', clientIp());
+        $limit=$pdo->prepare('INSERT INTO rate_limits (ip_hash, minute_bucket, requests) VALUES (?, ?, 1) ON DUPLICATE KEY UPDATE requests=IF(minute_bucket=VALUES(minute_bucket), requests+1, 1), minute_bucket=VALUES(minute_bucket)');
+        $limit->execute([$ipHash,$bucket]);
+        $count=$pdo->prepare('SELECT requests FROM rate_limits WHERE ip_hash=?'); $count->execute([$ipHash]);
+        if ((int)$count->fetchColumn() > 5) out(['error'=>'Limite atingido: aguarde o próximo minuto para tentar novamente.'],429);
     }
-} elseif ($action === 'draw') {
-    if (!$state['available']) { sendJson(['error' => 'Não há números disponíveis.'], 409); }
-    $index = random_int(0, count($state['available']) - 1);
-    $winner = $state['available'][$index];
-    array_splice($state['available'], $index, 1);
-    $state['drawn'][] = ['number' => $winner, 'drawnAt' => gmdate('c')];
-} elseif ($action === 'reset') {
-    $state['available'] = range(1, MAX_NUMBER);
-    $state['drawn'] = [];
-} elseif ($action !== 'load') {
-    sendJson(['error' => 'Ação inválida.'], 400);
+    $data=body(); $number=filter_var($data['numero'] ?? null,FILTER_VALIDATE_INT);
+    if (!$number || $number < 1 || $number > 3000) out(['error'=>'Informe um número de peito entre 01 e 3000.'],422);
+    try { $q=$pdo->prepare('INSERT INTO sorteio (numero, sorteado) VALUES (?, 0)'); $q->execute([$number]); }
+    catch (PDOException $e) { if ($e->getCode()==='23000') out(['error'=>'Este número de peito já está inscrito.'],409); throw $e; }
+    out(['ok'=>true,'message'=>'Inscrição confirmada para o número '.str_pad((string)$number,2,'0',STR_PAD_LEFT).'.']);
 }
-
-if ($action === 'load') {
-    flock($handle, LOCK_UN);
-    fclose($handle);
-    sendJson(['state' => $state, 'winner' => null]);
+if ($action === 'login') {
+    $data=body(); $q=$pdo->prepare('SELECT id, senha FROM admins WHERE nome=? LIMIT 1'); $q->execute([trim((string)($data['nome'] ?? ''))]); $row=$q->fetch();
+    if (!$row || !password_verify((string)($data['senha'] ?? ''),$row['senha'])) out(['error'=>'Credenciais inválidas.'],401);
+    session_regenerate_id(true); $_SESSION['raffle_admin']=(int)$row['id']; out(['ok'=>true]);
 }
-
-rewind($handle);
-ftruncate($handle, 0);
-$encoded = json_encode($state, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-if ($encoded === false || fwrite($handle, $encoded) === false || !fflush($handle)) {
-    flock($handle, LOCK_UN); fclose($handle);
-    sendJson(['error' => 'Não foi possível salvar os dados no servidor.'], 500);
+if ($action === 'logout') { unset($_SESSION['raffle_admin']); out(['ok'=>true]); }
+if ($action === 'status') { out(['closed'=>(bool)($pdo->query("SELECT valor FROM configuracoes WHERE chave='inscricoes_fechadas'")->fetchColumn() ?: 0)]); }
+if ($action === 'close') { requireAdmin(); $v=body(); $q=$pdo->prepare("INSERT INTO configuracoes(chave,valor) VALUES('inscricoes_fechadas',?) ON DUPLICATE KEY UPDATE valor=VALUES(valor)"); $q->execute([!empty($v['closed'])?'1':'0']); out(['ok'=>true]); }
+if ($action === 'list') { requireAdmin(); $rows=$pdo->query('SELECT id, numero, sorteado FROM sorteio ORDER BY numero')->fetchAll(); out(['entries'=>$rows]); }
+if ($action === 'draw') {
+    requireAdmin();
+    $pdo->beginTransaction();
+    $q=$pdo->query('SELECT id,numero FROM sorteio WHERE sorteado=0 ORDER BY RAND() LIMIT 1 FOR UPDATE'); $winner=$q->fetch();
+    if (!$winner) { $pdo->rollBack(); out(['error'=>'Não há participantes disponíveis.'],409); }
+    $u=$pdo->prepare('UPDATE sorteio SET sorteado=1 WHERE id=?'); $u->execute([$winner['id']]); $pdo->commit(); out(['winner'=>(int)$winner['numero']]);
 }
-flock($handle, LOCK_UN);
-fclose($handle);
-sendJson(['state' => $state, 'winner' => $winner ?? null]);
+if ($action === 'load') { requireAdmin(); out(['entries'=>$pdo->query('SELECT id,numero,sorteado FROM sorteio ORDER BY numero')->fetchAll()]); }
+out(['error'=>'Ação inválida.'],400);

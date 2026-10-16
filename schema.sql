@@ -1,0 +1,28 @@
+CREATE TABLE IF NOT EXISTS sorteio (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  numero SMALLINT UNSIGNED NOT NULL,
+  sorteado BOOLEAN NOT NULL DEFAULT FALSE,
+  UNIQUE KEY uq_sorteio_numero (numero),
+  CONSTRAINT chk_sorteio_numero CHECK (numero BETWEEN 1 AND 3000)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS admins (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  nome CHAR(80) NOT NULL UNIQUE,
+  senha VARCHAR(255) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS rate_limits (
+  ip_hash CHAR(64) NOT NULL PRIMARY KEY,
+  minute_bucket BIGINT NOT NULL,
+  requests SMALLINT UNSIGNED NOT NULL DEFAULT 0
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS configuracoes (
+  chave VARCHAR(80) NOT NULL PRIMARY KEY,
+  valor VARCHAR(255) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+INSERT IGNORE INTO configuracoes (chave, valor) VALUES ('inscricoes_fechadas', '0');
+
+-- Crie o hash no servidor com: php -r "echo password_hash('SUA_SENHA_FORTE', PASSWORD_DEFAULT), PHP_EOL;"
+-- Depois: INSERT INTO admins (nome, senha) VALUES ('colaborador', 'HASH_GERADO');
